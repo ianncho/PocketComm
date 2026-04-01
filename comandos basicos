@@ -1,0 +1,13 @@
+ir para la derecha:
+adb shell "python3 -c \"import socket; s=socket.socket(); s.connect(('127.0.0.1',9999)); s.send(b'RIGHT'); s.close()\""
+
+escribir hola en ia:
+adb shell "python3 -c \"import socket; s=socket.socket(); s.connect(('127.0.0.1',9999)); s.send(b'h'); s.close()\""
+adb shell "python3 -c \"import socket; s=socket.socket(); s.connect(('127.0.0.1',9999)); s.send(b'o'); s.close()\""
+adb shell "python3 -c \"import socket; s=socket.socket(); s.connect(('127.0.0.1',9999)); s.send(b'l'); s.close()\""
+adb shell "python3 -c \"import socket; s=socket.socket(); s.connect(('127.0.0.1',9999)); s.send(b'a'); s.close()\""
+adb shell "python3 -c \"import socket; s=socket.socket(); s.connect(('127.0.0.1',9999)); s.send(b'ENTER'); s.close()\""
+
+primer nota:
+adb shell "python3 -c \"import socket; s=socket.socket(); s.connect(('127.0.0.1',9999)); s.send(b'mi primera nota'); s.close()\""
+adb shell "python3 -c \"import socket; s=socket.socket(); s.connect(('127.0.0.1',9999)); s.send(b'ENTER'); s.close()\""
