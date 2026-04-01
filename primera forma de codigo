@@ -1,0 +1,238 @@
+#include <Arduino_GFX_Library.h>
+#include <Adafruit_NeoPixel.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+
+#define LED_PIN   8
+#define UART_RX   2
+#define UART_TX   3
+#define TFT_BL    22
+#define NUM_LEDS  1
+
+#define TFT_DC    15
+#define TFT_CS    14
+#define TFT_SCLK  7
+#define TFT_MOSI  6
+#define TFT_RST   21
+
+const char* WIFI_SSID = "MOVISTAR-WIFI6-5BD0";
+const char* WIFI_PASS = "48842677";
+
+//const char* WIFI_SSID = "Estudiantes";
+//const char* WIFI_PASS = "Escuelas_2025";
+
+Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, -1);
+Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 3, true, 172, 320, 34, 0);
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+#define C_BG      0x0000
+#define C_BG2     0x0841
+#define C_PURPLE  0x7BDB
+#define C_TEXT    0xCE59
+#define C_MUTED   0x52AA
+#define C_DIM     0x2945
+#define C_BORDER  0x18C3
+#define C_GREEN   0x07E0
+#define C_RED     0xF800
+
+int currentApp = 0;
+String uartBuffer = "";
+String appName  = "POCKETCOMM";
+String topRight = "";
+String from1 = "", msg1 = ""; bool p1 = false;
+String from2 = "", msg2 = ""; bool p2 = false;
+String from3 = "", msg3 = ""; bool p3 = false;
+String inputTxt = "";
+
+void setLED(uint8_t r, uint8_t g, uint8_t b) {
+    strip.setPixelColor(0, strip.Color(r, g, b));
+    strip.show();
+}
+
+void drawText(int x, int y, String txt, uint16_t color, uint8_t size = 1) {
+    gfx->setTextColor(color);
+    gfx->setTextSize(size);
+    gfx->setCursor(x, y);
+    gfx->print(txt);
+}
+
+void drawScreen() {
+    gfx->fillScreen(C_BG);
+
+    // Barra superior
+    gfx->fillRect(0, 0, gfx->width(), 18, C_BG2);
+    gfx->drawFastHLine(0, 18, gfx->width(), C_BORDER);
+    drawText(8, 5, appName, C_PURPLE);
+    if (topRight.length() > 0) {
+        drawText(gfx->width() - topRight.length() * 6 - 8, 5, topRight, C_DIM);
+    }
+
+    // Contenido
+    int y = 28;
+    int lineH = 28;
+
+    if (from1.length() > 0) drawText(8,  y, from1, C_DIM);
+    if (msg1.length()  > 0) drawText(48, y, msg1,  p1 ? C_PURPLE : C_TEXT);
+    y += lineH;
+    if (from2.length() > 0) drawText(8,  y, from2, C_DIM);
+    if (msg2.length()  > 0) drawText(48, y, msg2,  p2 ? C_PURPLE : C_TEXT);
+    y += lineH;
+    if (from3.length() > 0) drawText(8,  y, from3, C_DIM);
+    if (msg3.length()  > 0) drawText(48, y, msg3,  p3 ? C_PURPLE : C_TEXT);
+
+    // Barra inferior
+    gfx->fillRect(0, gfx->height() - 18, gfx->width(), 18, C_BG2);
+    gfx->drawFastHLine(0, gfx->height() - 18, gfx->width(), C_BORDER);
+    String inp = "> ";
+    if (inputTxt.length() > 0) inp += inputTxt;
+    inp += "_";
+    drawText(8, gfx->height() - 13, inp, C_MUTED);
+
+    // Puntos navegacion
+    for (int i = 0; i < 4; i++) {
+        int x = gfx->width() - 12 - (3 - i) * 10;
+        gfx->fillCircle(x, gfx->height() - 10, 3, i == currentApp ? C_PURPLE : C_DIM);
+    }
+}
+
+void handleLuckFoxMessage(String &msg) {
+    JsonDocument doc;
+    if (deserializeJson(doc, msg)) return;
+
+    const char* type = doc["type"];
+    if (!type) return;
+
+    if (strcmp(type, "screen") == 0) {
+        if (doc.containsKey("app")) {
+            currentApp = doc["app"]| 0;
+            const char* names[] = {"POCKETCOMM","MENSAJES","CHAT IA","NOTAS"};
+            const char* rights[] = {"","esp-now","groq","notas"};
+            appName  = names[currentApp];
+            topRight = rights[currentApp];
+        }
+        if (doc.containsKey("f1")) from1 = doc["f1"]| "";
+        if (doc.containsKey("l1")) msg1  = doc["l1"]| "";
+        p1 = doc["p1"] | false;
+        if (doc.containsKey("f2")) from2 = doc["f2"]| "";
+        if (doc.containsKey("l2")) msg2  = doc["l2"]| "";
+        p2 = doc["p2"] | false;
+        if (doc.containsKey("f3")) from3 = doc["f3"]| "";
+        if (doc.containsKey("l3")) msg3  = doc["l3"]| "";
+        p3 = doc["p3"] | false;
+        if (doc.containsKey("input")) inputTxt = doc["input"]| "";
+        drawScreen();
+    }
+    else if (strcmp(type, "led") == 0) {
+        setLED(doc["r"] | 0, doc["g"] | 0, doc["b"] | 0);
+    }
+    else if (strcmp(type, "espnow_send") == 0) {
+        Serial.println("ESP-NOW: " + String(doc["msg"] | ""));
+    }
+}
+
+void readUART() {
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n') {
+            uartBuffer.trim();
+            if (uartBuffer.length() > 0 && uartBuffer.startsWith("{")) {
+                Serial.println("JSON: " + uartBuffer);
+                handleLuckFoxMessage(uartBuffer);
+            }
+            uartBuffer = "";
+        } else if (c >= 32 && c < 127) {
+            uartBuffer += c;
+            if (uartBuffer.length() > 1024) uartBuffer = "";
+        }
+    }
+}
+
+void handleSerialInput() {
+    static String kb = "";
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n' || c == '\r') {
+            if (kb.length() > 0) {
+                JsonDocument doc;
+                doc["type"] = "key";
+                doc["val"]  = kb;
+                String out;
+                serializeJson(doc, out);
+                Serial.println(out);
+                kb = "";
+                inputTxt = "";
+                drawScreen();
+            }
+        } else {
+            kb += c;
+            inputTxt = kb;
+            gfx->fillRect(0, gfx->height() - 17, gfx->width() - 50, 16, C_BG2);
+            drawText(8, gfx->height() - 13, "> " + kb + "_", C_MUTED);
+        }
+    }
+}
+
+void connectWiFi() {
+    topRight = "wifi...";
+    drawScreen();
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    int tries = 0;
+    while (WiFi.status() != WL_CONNECTED && tries < 20) {
+        delay(500);
+        tries++;
+    }
+    if (WiFi.isConnected()) {
+        topRight = "wifi ok";
+        drawScreen();
+        StaticJsonDocument<128> d;
+        d["type"] = "wifi_ready";
+        d["ip"]   = WiFi.localIP().toString();
+        String out;
+        serializeJson(d, out);
+        Serial.println(out);
+    } else {
+        topRight = "sin wifi";
+        drawScreen();
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial1.begin(115200, SERIAL_8N1, UART_RX, UART_TX);
+
+    strip.begin();
+    strip.setBrightness(20);
+    strip.show();
+    setLED(20, 20, 20);
+
+    gfx->begin();
+    gfx->fillScreen(C_BG);
+    gfx->setFont();
+
+    ledcAttach(TFT_BL, 5000, 8);
+    ledcWrite(TFT_BL, 80);
+
+    msg1 = "--:--";
+    msg2 = "iniciando...";
+    p1 = true;
+    drawScreen();
+
+    setLED(0, 0, 20);
+    Serial.println("ESP32 LISTO");
+    Serial1.println("ESP32 LISTO SERIAL1");
+    connectWiFi();
+}
+
+void loop() {
+    readUART();
+    handleSerialInput();
+
+    static unsigned long lastWifi = 0;
+    if (millis() - lastWifi > 30000) {
+        lastWifi = millis();
+        if (!WiFi.isConnected()) WiFi.reconnect();
+    }
+    delay(5);
+}
