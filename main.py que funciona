@@ -1,0 +1,302 @@
+cat > /tmp/main.py << 'PYEOF'
+import json
+import time
+import threading
+import socket
+import serial
+from datetime import datetime
+
+CONFIG_FILE = "/mnt/sdcard/pocketcomm/config.json"
+
+def load_config():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    except:
+        return {}
+
+config = load_config()
+current_app = 0
+input_buffer = ""
+ai_history = []
+uart = None
+
+def uart_send(data):
+    global uart
+    try:
+        if uart and uart.is_open:
+            line = json.dumps(data, ensure_ascii=False) + "\n"
+            uart.write(line.encode("utf-8"))
+    except Exception as e:
+        print(f"UART send error: {e}")
+
+def update_screen(app=None, f1="", l1="", p1=False,
+                  f2="", l2="", p2=False,
+                  f3="", l3="", p3=False, input_txt=""):
+    uart_send({
+        "type": "screen",
+        "app":  app if app is not None else current_app,
+        "f1": f1, "l1": l1, "p1": p1,
+        "f2": f2, "l2": l2, "p2": p2,
+        "f3": f3, "l3": l3, "p3": p3,
+        "input": input_txt
+    })
+
+def set_led(r, g, b):
+    uart_send({"type": "led", "r": r, "g": g, "b": b})
+
+def show_clock():
+    now = datetime.now()
+    hora = now.strftime("%H:%M")
+    fecha = now.strftime("%A %d %b").lower()
+    update_screen(0, "", hora, True, "", fecha, False)
+
+def show_messages():
+    try:
+        from messages import get_messages_display
+        msgs = get_messages_display()
+    except:
+        msgs = ["sin mensajes", "", ""]
+    while len(msgs) < 3:
+        msgs.append("")
+    update_screen(1,
+        "ellos", msgs[0], False,
+        "yo",    msgs[1], True,
+        "",      msgs[2], False
+    )
+    set_led(0, 30, 0)
+
+def show_ai():
+    update_screen(2, "", "Chat IA listo", True, "", "escribi algo...", False)
+    set_led(20, 0, 30)
+
+def show_notes():
+    try:
+        from notes import get_notes_display
+        lines = get_notes_display()
+    except:
+        lines = ["sin notas", "", ""]
+    while len(lines) < 3:
+        lines.append("")
+    update_screen(3,
+        "", lines[0], False,
+        "", lines[1], False,
+        "", lines[2], False
+    )
+    set_led(30, 15, 0)
+
+def refresh_current_app():
+    if current_app == 0:   show_clock()
+    elif current_app == 1: show_messages()
+    elif current_app == 2: show_ai()
+    elif current_app == 3: show_notes()
+
+def ask_ai(question):
+    global config, ai_history
+    try:
+        import ssl, urllib.request
+        config = load_config()
+        api_key = config.get("openai_api_key", "")
+        model   = config.get("ai_model", "llama-3.1-8b-instant")
+        system  = config.get("ai_system", "Sos un asistente conciso. Respondé en menos de 80 caracteres.")
+
+        messages = [{"role": "system", "content": system}]
+        for h in ai_history[-6:]:
+            messages.append(h)
+        messages.append({"role": "user", "content": question})
+
+        payload = json.dumps({
+            "model": model,
+            "messages": messages,
+            "max_tokens": 150,
+            "temperature": 0.7
+        }).encode("utf-8")
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "curl/7.88.1"
+            },
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return f"Error: {str(e)[:50]}"
+
+def handle_key(val):
+    global current_app, input_buffer, ai_history
+    val = val.strip()
+
+    if val == "LEFT":
+        current_app = (current_app - 1) % 4
+        input_buffer = ""
+        refresh_current_app()
+        return
+
+    if val == "RIGHT":
+        current_app = (current_app + 1) % 4
+        input_buffer = ""
+        refresh_current_app()
+        return
+
+    if val == "BACK":
+        if input_buffer:
+            input_buffer = input_buffer[:-1]
+        update_screen(input_txt=input_buffer)
+        return
+
+    if val == "ENTER":
+        text = input_buffer.strip()
+        input_buffer = ""
+        if not text:
+            return
+        if current_app == 3:
+            try:
+                from notes import add_note
+                add_note(text)
+            except Exception as e:
+                print(f"Note error: {e}")
+            show_notes()
+        elif current_app == 1:
+            update_screen(1, "", "Enviando...", False)
+            time.sleep(0.5)
+            show_messages()
+        elif current_app == 2:
+            update_screen(2, "yo", text[:40], False, "ia", "pensando...", True)
+            set_led(20, 0, 80)
+            resp = ask_ai(text)
+            ai_history.append({"role": "user", "content": text})
+            ai_history.append({"role": "assistant", "content": resp})
+            if len(ai_history) > 12:
+                ai_history = ai_history[-12:]
+            mid = len(resp) // 2
+            update_screen(2,
+                "yo", text[:38], False,
+                "ia", resp[:mid], True,
+                "",   resp[mid:80], False
+            )
+            set_led(20, 0, 30)
+        return
+
+    if len(val) == 1:
+        input_buffer += val
+        update_screen(input_txt=input_buffer)
+
+uart_buffer = ""
+
+def read_uart():
+    global uart_buffer
+    while True:
+        try:
+            if uart and uart.in_waiting:
+                c = uart.read().decode("utf-8", errors="ignore")
+                if c == "\n":
+                    line = uart_buffer.strip()
+                    if line:
+                        process_esp32_message(line)
+                    uart_buffer = ""
+                else:
+                    uart_buffer += c
+                    if len(uart_buffer) > 1024:
+                        uart_buffer = ""
+        except Exception as e:
+            print(f"UART read error: {e}")
+        time.sleep(0.01)
+
+def process_esp32_message(msg):
+    try:
+        data = json.loads(msg)
+        t = data.get("type")
+        if t == "key":
+            handle_key(data.get("val", ""))
+        elif t == "wifi_ready":
+            print(f"WiFi ESP32 listo: {data.get('ip')}")
+            set_led(0, 50, 0)
+            time.sleep(0.3)
+            refresh_current_app()
+        elif t == "http_resp":
+            print(f"HTTP resp: {data.get('code')}")
+        elif t == "espnow_recv":
+            sender = data.get("from", "???")
+            text   = data.get("msg", "")
+            try:
+                from messages import add_message
+                add_message(sender, text, outgoing=False)
+            except:
+                pass
+            if current_app == 1:
+                show_messages()
+            set_led(0, 80, 0)
+            time.sleep(0.3)
+            set_led(0, 30, 0)
+    except Exception as e:
+        print(f"ESP32 msg error: {e}")
+
+def command_server():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", 9999))
+    s.listen(5)
+    print("Command server en puerto 9999")
+    while True:
+        try:
+            conn, addr = s.accept()
+            data = conn.recv(1024).decode().strip()
+            if data:
+                handle_key(data)
+            conn.close()
+        except Exception as e:
+            print(f"Command server error: {e}")
+
+def clock_loop():
+    while True:
+        if current_app == 0:
+            show_clock()
+        time.sleep(30)
+
+def main():
+    global uart, config
+    config = load_config()
+    print("PocketComm LuckFox iniciando...")
+
+    uart_port = config.get("uart_port", "/dev/ttyFIQ0")
+    uart_baud = config.get("uart_baud", 115200)
+    try:
+        uart = serial.Serial(uart_port, uart_baud, timeout=1)
+        print(f"UART conectado en {uart_port}")
+    except Exception as e:
+        print(f"UART error: {e}")
+        uart = None
+
+    threading.Thread(target=read_uart,      daemon=True).start()
+    threading.Thread(target=command_server, daemon=True).start()
+    threading.Thread(target=clock_loop,     daemon=True).start()
+
+    time.sleep(1)
+    update_screen(0, "", "PocketComm", True, "", "iniciando...", False)
+    set_led(0, 0, 30)
+    time.sleep(1)
+    show_clock()
+
+    print("Listo.")
+    while True:
+        time.sleep(1)
+
+if __name__ == "__main__":
+    main()
+PYEOF
+adb push /tmp/main.py /mnt/sdcard/pocketcomm/main.py
+```
+
+Y corrélo:
+```
+adb shell "cd /mnt/sdcard/pocketcomm && PYTHONPATH=/mnt/sdcard/lib python3 main.py"
